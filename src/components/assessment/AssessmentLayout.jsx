@@ -1,0 +1,384 @@
+import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { AlertTriangle, Mic, Code, BrainCircuit, CheckCircle, FileText, Lock } from 'lucide-react';
+import OrbitingProctor from './OrbitingProctor';
+import CodeSanctuary from './CodeSanctuary';
+import MCQSession from './MCQSession';
+import SubjectiveSession from './SubjectiveSession';
+import ComplianceBanner from '../common/ComplianceBanner';
+
+// Central Core
+const DataCore = () => (
+    <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] pointer-events-none z-0 opacity-40">
+        <div className="relative w-full h-full animate-[spin_60s_linear_infinite]">
+            <div className="absolute inset-0 rounded-full border border-purple-500/20 mix-blend-screen skew-x-12 animate-[spin_20s_linear_infinite_reverse]"></div>
+            <div className="absolute inset-10 rounded-full border border-blue-500/20 mix-blend-screen skew-y-12 animate-[spin_15s_linear_infinite]"></div>
+            <div className="absolute inset-20 rounded-full border border-cyan-500/20 mix-blend-screen animate-pulse"></div>
+            <div className="absolute inset-0 bg-gradient-to-r from-purple-900/10 to-blue-900/10 rounded-full blur-3xl"></div>
+        </div>
+    </div>
+);
+
+// Stage Switcher (Read-Only / Progress Indicator)
+const StageSwitcher = ({ currentStage }) => (
+    <div className="flex items-center justify-center space-x-8 mb-8 relative z-20">
+        {[
+            { id: 'mcq', label: 'Knowledge', icon: BrainCircuit },
+            { id: 'subjective', label: 'Architecture', icon: FileText },
+            { id: 'coding', label: 'Code', icon: Code },
+            { id: 'interview', label: 'Interview', icon: Mic },
+        ].map((stage, idx) => {
+            const isActive = currentStage === stage.id;
+            // Determine if passed
+            const isPassed = determinePassed(currentStage, stage.id);
+
+            return (
+                <div
+                    key={stage.id}
+                    className={`relative flex items-center space-x-2 px-6 py-3 rounded-xl transition-all duration-500 ${isActive
+                        ? 'bg-white/10 border border-white/20 text-white shadow-[0_0_20px_-5px_rgba(255,255,255,0.2)]'
+                        : isPassed ? 'text-green-400 opacity-60' : 'text-gray-600 opacity-40'
+                        }`}
+                >
+                    {isPassed ? <CheckCircle size={18} /> : <stage.icon size={18} className={isActive ? 'text-purple-400' : ''} />}
+                    <span className="font-medium">{stage.label}</span>
+                    {isActive && (
+                        <motion.div
+                            layoutId="active-stage"
+                            className="absolute bottom-0 left-0 w-full h-0.5 bg-gradient-to-r from-purple-500 to-cyan-500"
+                        />
+                    )}
+                    {!isActive && !isPassed && <Lock size={12} className="ml-2" />}
+                </div>
+            )
+        })}
+    </div>
+);
+
+import CandidateService from '../../services/CandidateService';
+
+const determinePassed = (current, target) => {
+    const stages = ['mcq', 'subjective', 'coding', 'interview', 'complete'];
+    return stages.indexOf(current) > stages.indexOf(target);
+};
+
+// ── Progress persistence (so a candidate can exit and resume) ──
+const progressKey = (id) => `assessment_progress_${id}`;
+const draftKeys = (id) => [
+    `assessment_draft_${id}_mcq`,
+    `assessment_draft_${id}_subjective`,
+];
+const loadProgress = (id) => {
+    if (!id) return null;
+    try { return JSON.parse(localStorage.getItem(progressKey(id))); } catch { return null; }
+};
+const clearAllProgress = (id) => {
+    if (!id) return;
+    localStorage.removeItem(progressKey(id));
+    draftKeys(id).forEach((k) => localStorage.removeItem(k));
+};
+
+const AssessmentLayout = ({ assessmentId }) => {
+    const saved = loadProgress(assessmentId); // restore prior session if present
+    const [anomaly, setAnomaly] = useState(null);
+    const [stage, setStage] = useState(saved?.stage || 'mcq'); // 'mcq' | 'subjective' | 'coding' | 'interview' | 'complete'
+    const [testData, setTestData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [results, setResults] = useState(saved?.results || []);
+    const [resumed] = useState(!!saved);
+    const resultsRef = React.useRef(saved?.results || []);
+
+    // Persist completed-stage progress on every change (skip the terminal stage).
+    useEffect(() => {
+        if (!assessmentId || stage === 'complete') return;
+        localStorage.setItem(progressKey(assessmentId), JSON.stringify({ stage, results }));
+    }, [stage, results, assessmentId]);
+
+    useEffect(() => {
+        const loadTest = async () => {
+            try {
+                setLoading(true);
+                const data = await CandidateService.startTest(assessmentId);
+                setTestData(data);
+                setLoading(false);
+            } catch (err) {
+                console.error('Error starting test:', err);
+                setError(err.message || 'Failed to load assessment. Please ensure you are authorized.');
+                setLoading(false);
+            }
+        };
+
+        if (assessmentId) {
+            loadTest();
+        }
+    }, [assessmentId]);
+
+    const triggerAnomaly = (msg) => {
+        setAnomaly(msg);
+        setTimeout(() => setAnomaly(null), 2000);
+    };
+
+    const nextStage = (stageResult) => {
+        // Collect result(s) - stageResult can be a single answer or contain allAnswers array
+        if (stageResult) {
+            const newAnswers = [];
+
+            // If the session passed all collected answers
+            if (stageResult.allAnswers && Array.isArray(stageResult.allAnswers)) {
+                stageResult.allAnswers.forEach(ans => {
+                    newAnswers.push({
+                        questionId: ans.questionId || 'unknown',
+                        selectedOption: ans.selectedOption || null,
+                        codeAnswer: ans.codeAnswer || ans.answer || ans.code || null
+                    });
+                });
+            } else {
+                // Single answer
+                newAnswers.push({
+                    questionId: stageResult.questionId || 'unknown',
+                    selectedOption: stageResult.selectedOption || null,
+                    codeAnswer: stageResult.codeAnswer || stageResult.answer || stageResult.code || null
+                });
+            }
+
+            setResults(prev => {
+                const updated = [...prev, ...newAnswers];
+                resultsRef.current = updated;
+                return updated;
+            });
+        }
+
+        const flow = {
+            'mcq': 'subjective',
+            'subjective': 'coding',
+            'coding': 'interview',
+            'interview': 'complete'
+        };
+
+        const next = flow[stage];
+        setStage(next);
+
+        // If complete, trigger final submission with a small delay to ensure state is committed
+        if (next === 'complete') {
+            setTimeout(() => handleSubmitAll(), 100);
+        }
+    };
+
+    const handleSubmitAll = async () => {
+        try {
+            // Flush remaining proctoring logs
+            try {
+                await proctorService.flushLogs(testData?.submissionId || assessmentId);
+            } catch (e) {
+                console.warn('Proctor flush failed (non-critical):', e);
+            }
+
+            // Use ref for latest results to avoid stale closure
+            const allAnswers = resultsRef.current;
+            console.log('=== Submitting assessment with', allAnswers.length, 'answers:', allAnswers);
+
+            const submissionData = {
+                assessmentId,
+                answers: allAnswers
+            };
+
+            const response = await CandidateService.submitTest(submissionData);
+            console.log('Final assessment submitted successfully:', response);
+            // Test is submitted — clear saved progress so it won't resume next time.
+            clearAllProgress(assessmentId);
+        } catch (err) {
+            console.error('Error submitting assessment:', err);
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="min-h-screen bg-black flex items-center justify-center">
+                <div className="flex flex-col items-center">
+                    <div className="w-12 h-12 border-4 border-purple-500/30 border-t-purple-500 rounded-full animate-spin mb-4"></div>
+                    <p className="text-gray-400 animate-pulse">Initializing Neural Link...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="min-h-screen bg-black flex items-center justify-center p-8">
+                <div className="max-w-md w-full bg-red-500/10 border border-red-500/30 rounded-2xl p-8 text-center">
+                    <AlertTriangle size={48} className="text-red-500 mx-auto mb-4" />
+                    <h2 className="text-2xl font-bold text-white mb-2">System Error</h2>
+                    <p className="text-red-300 mb-6">{error}</p>
+                    <button
+                        onClick={() => window.location.href = '/'}
+                        className="px-6 py-2 bg-white text-black rounded-lg font-bold"
+                    >
+                        Return to Safety
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className={`min-h-screen bg-black text-white relative overflow-hidden flex flex-col ${anomaly ? 'animate-shake' : ''}`}>
+            <style>{`
+                @keyframes shake {
+                    0%, 100% { transform: translateX(0); }
+                    25% { transform: translateX(-5px) rotate(-1deg); box-shadow: inset 0 0 50px red; }
+                    75% { transform: translateX(5px) rotate(1deg); box-shadow: inset 0 0 50px red; }
+                }
+                .animate-shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+            `}</style>
+
+            <DataCore />
+            {/* Invisible Proctoring Layer */}
+            <OrbitingProctor
+                onAnomaly={triggerAnomaly}
+                submissionId={testData?.submissionId || assessmentId}
+            />
+
+            {/* Anomaly Overlay */}
+            <AnimatePresence>
+                {anomaly && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 1.2 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none"
+                    >
+                        <div className="bg-red-500/10 backdrop-blur-md border border-red-500/50 px-8 py-4 rounded-2xl flex items-center space-x-4 shadow-[0_0_50px_rgba(239,68,68,0.4)]">
+                            <AlertTriangle size={32} className="text-red-500 animate-bounce" />
+                            <div>
+                                <h2 className="text-xl font-bold text-red-100">ANOMALY DETECTED</h2>
+                                <p className="text-red-300">{anomaly}</p>
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full p-8 relative z-10 pt-24">
+                {testData?.title && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-center mb-8"
+                    >
+                        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-400">
+                            {testData.title}
+                        </h1>
+                        {testData.durationMinutes && (
+                            <p className="text-gray-500 text-sm mt-2 font-mono">
+                                Time Limit: {testData.durationMinutes} Minutes
+                            </p>
+                        )}
+                    </motion.div>
+                )}
+
+                {resumed && (
+                    <div className="mx-auto mb-4 max-w-md text-center text-sm text-green-300 bg-green-500/10 border border-green-500/30 rounded-lg px-4 py-2">
+                        Welcome back — we restored your previous progress.
+                    </div>
+                )}
+
+                <StageSwitcher currentStage={stage} />
+
+                <AnimatePresence mode="wait">
+                    <motion.div
+                        key={stage}
+                        initial={{ y: 20, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        exit={{ y: -20, opacity: 0 }}
+                        transition={{ duration: 0.5 }}
+                        className="flex-1"
+                    >
+                        {stage === 'mcq' && (
+                            <MCQSession
+                                onComplete={(ans) => nextStage(ans)}
+                                questions={testData?.questions?.filter(q => q.type === 'MCQ')}
+                                assessmentId={assessmentId}
+                            />
+                        )}
+
+                        {stage === 'subjective' && (
+                            <SubjectiveSession
+                                onComplete={(ans) => nextStage(ans)}
+                                questions={testData?.questions?.filter(q => q.type === 'SUBJECTIVE')}
+                                assessmentId={assessmentId}
+                            />
+                        )}
+
+                        {stage === 'coding' && (() => {
+                            const codingQuestions = testData?.questions?.filter(q => q.type === 'CODING') || [];
+                            if (codingQuestions.length === 0) {
+                                // No coding questions — auto-advance
+                                setTimeout(() => nextStage(null), 100);
+                                return (
+                                    <div className="h-[600px] flex items-center justify-center bg-white/5 border border-white/10 rounded-2xl">
+                                        <p className="text-gray-400">No coding questions — advancing...</p>
+                                    </div>
+                                );
+                            }
+                            return (
+                                <div className="h-[600px]">
+                                    <CodeSanctuary
+                                        onComplete={(code) => nextStage(code)}
+                                        onAnomaly={triggerAnomaly}
+                                        problem={codingQuestions[0]}
+                                        submissionId={testData?.submissionId || assessmentId}
+                                    />
+                                </div>
+                            );
+                        })()}
+
+                        {stage === 'interview' && (() => {
+                            const interviewQuestion = testData?.questions?.find(q => q.type === 'INTERVIEW');
+                            // No interview questions — auto-advance to complete
+                            if (!interviewQuestion) {
+                                setTimeout(() => nextStage(null), 100);
+                                return (
+                                    <div className="h-[600px] flex items-center justify-center bg-white/5 border border-white/10 rounded-2xl">
+                                        <p className="text-gray-400">Finalizing assessment...</p>
+                                    </div>
+                                );
+                            }
+                            return (
+                                <div className="h-[600px] flex items-center justify-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl relative overflow-hidden flex-col">
+                                    <div className="w-32 h-32 rounded-full bg-gradient-to-r from-purple-500 to-cyan-500 animate-pulse shadow-[0_0_50px_rgba(168,85,247,0.4)] flex items-center justify-center mb-8">
+                                        <Mic size={48} className="text-white" />
+                                    </div>
+                                    <h2 className="text-3xl font-bold text-white mb-2">AI Interview Active</h2>
+                                    <p className="text-gray-400 mb-8">{interviewQuestion.text}</p>
+                                    <button
+                                        onClick={() => nextStage({
+                                            questionId: interviewQuestion.id,
+                                            codeAnswer: 'completed'
+                                        })}
+                                        className="px-8 py-3 bg-white text-black rounded-full font-bold hover:scale-105 transition-transform"
+                                    >
+                                        Finish Interview
+                                    </button>
+                                </div>
+                            );
+                        })()}
+
+                        {stage === 'complete' && (
+                            <div className="h-[600px] flex flex-col items-center justify-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl">
+                                <CheckCircle size={80} className="text-green-500 mb-6" />
+                                <h2 className="text-4xl font-bold text-white mb-4">Assessment Complete</h2>
+                                <p className="text-gray-400 text-xl">Your sessions have been digitized and uploaded.</p>
+                                <div className="mt-8">
+                                    <a href="/" className="text-purple-400 hover:text-purple-300 underline">Return to Dashboard</a>
+                                </div>
+                            </div>
+                        )}
+                    </motion.div>
+                </AnimatePresence>
+            </div>
+        </div>
+    );
+};
+
+export default AssessmentLayout;
